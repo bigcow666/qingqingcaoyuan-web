@@ -116,7 +116,7 @@
   function setupChar(o) {
     var st = {
       video: o.video, glCanvas: o.glCanvas, c2dCanvas: o.c2dCanvas,
-      mode: 'gl', dead: false, drewAny: false, checked: false, last: -1, watchCT: -1, stuck: 0,
+      mode: 'gl', dead: false, drewAny: false, checked: false, last: -1,
       gl: null, tex: null, d2: null
     };
 
@@ -275,7 +275,6 @@
     animSrc: 'assets/frog_anim.webp', webmSrc: 'assets/frog.webm'
   });
 
-  var watchLast = 0;
   (function loop() {
     for (var i = 0; i < charStates.length; i++) {
       var st = charStates[i];
@@ -283,32 +282,8 @@
       if (st.mode === 'gl' && st.gl) drawGL(st);
       else if (st.mode === '2d') draw2D(st);
     }
-    var now = performance.now();
-    if (now - watchLast > 1000) {
-      watchLast = now;
-      for (var j = 0; j < charStates.length; j++) {
-        var s2 = charStates[j];
-        if (s2.dead || (s2.mode !== 'gl' && s2.mode !== '2d')) continue;
-        var v2 = s2.video;
-        if (v2.readyState >= 2) {
-          if (s2.watchCT === v2.currentTime) {
-            s2.stuck++;
-            if (s2.stuck >= 3) s2.toAnim();
-          } else { s2.stuck = 0; }
-          s2.watchCT = v2.currentTime;
-        }
-      }
-    }
     requestAnimationFrame(loop);
   })();
-
-  /* 第一次点页面时，把被浏览器按住没播的视频再叫醒一次 */
-  window.addEventListener('pointerdown', function () {
-    for (var i = 0; i < charStates.length; i++) {
-      var v = charStates[i].video;
-      if (v && v.paused && v.play) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
-    }
-  });
 
   /* ================= 音频：WebAudio 单通道混音 ================= */
   var MIX_DEFAULT = { cow: 1.0, frog: 0.10 };
