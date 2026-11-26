@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>青青草原</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    font-family: sans-serif; touch-action: none; -webkit-user-select: none; user-select: none;
+    background: url('assets/bg.webp') center center / cover no-repeat #6aa84f;
+  }
+
+  /* ===== 场景：横屏大图铺满全屏，比例锁定，不缩放不平移 ===== */
+  #stage { position: fixed; inset: 0; }
+  #bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+
+  .cloud {
+    position: absolute; border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(255,255,255,.85), rgba(255,255,255,0) 70%);
+    pointer-events: none; animation: drift linear infinite;
+  }
+  @keyframes drift { from { transform: translateX(-15vw); } to { transform: translateX(115vw); } }
+
+  .char { position: absolute; bottom: 2.5%; transform: translateX(-50%); }
+  .char canvas.gl, .char img.anim { display: block; width: 100%; height: 100%; pointer-events: none; }
+  .char video.src {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; pointer-events: none;
+  }
+  .char .shadow {
+    position: absolute; left: 50%; bottom: -2%; width: 78%; height: 5%;
+    transform: translateX(-50%);
+    background: radial-gradient(ellipse at center, rgba(30,60,20,.35), rgba(30,60,20,0) 70%);
+    border-radius: 50%;
+  }
+  .char .halo {
+    position: absolute; inset: -4% -7%; border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(255,240,170,.38), rgba(255,240,170,0) 65%);
+    opacity: 0; transition: opacity .6s; pointer-events: none;
+  }
+  .char.active .halo { opacity: 1; }
+  #cow  { left: 36%; height: 74%; aspect-ratio: 1078 / 1282; z-index: 3; }
+  #frog { left: 67%; height: 64%; aspect-ratio: 656 / 854;  z-index: 3; }
+  @media (max-aspect-ratio: 1/1) {
+    #cow  { left: 28%; width: 47%; height: auto; }
+    #frog { left: 73%; width: 41%; height: auto; }
+  }
+
+  /* ===== 前景小草：高度由脚本按屏幕宽度设定，永远不变 ===== */
+  #grass { position: fixed; left: 0; right: 0; bottom: 0; height: 30px; z-index: 5; pointer-events: none; }
+  #grass svg { position: absolute; bottom: -4px; height: 30px; overflow: visible; }
+  .tuft { transform-origin: bottom center; animation: sway 3.4s ease-in-out infinite alternate; }
+  @keyframes sway { from { transform: rotate(-2.6deg); } to { transform: rotate(2.6deg); } }
+
+  /* ===== 飘叶：CSS 动画（硬件加速，不占主线程，不卡） ===== */
+  #leaves { position: fixed; inset: 0; z-index: 6; pointer-events: none; overflow: hidden; }
+  .leaf { position: absolute; top: 0; will-change: transform; animation: leafFly linear infinite; }
+  .leaf svg { display: block; width: 100%; height: 100%; }
+  @keyframes leafFly {
+    0%   { transform: translate(-6vw, 6vh) rotate(0deg); }
+    25%  { transform: translate(22vw, 16vh) rotate(140deg); }
+    50%  { transform: translate(48vw, 7vh) rotate(300deg); }
+    75%  { transform: translate(74vw, 18vh) rotate(470deg); }
+    100% { transform: translate(104vw, 9vh) rotate(640deg); }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <img id="bg" src="assets/bg.webp" alt="">
+  <div class="cloud" style="top:6%;  width:34vw; height:9vh;  animation-duration:95s;  animation-delay:-30s;"></div>
+  <div class="cloud" style="top:14%; width:26vw; height:7vh;  animation-duration:120s; animation-delay:-80s;"></div>
+  <div class="cloud" style="top:3%;  width:20vw; height:6vh;  animation-duration:140s; animation-delay:-55s;"></div>
+
+  <div class="char active" id="cow">
+    <div class="halo"></div><div class="shadow"></div>
+    <video class="src" id="cowSrc" src="assets/cow_packed.mp4" autoplay muted loop playsinline preload="auto"></video>
+    <canvas class="gl" id="cowGl"></canvas>
+  </div>
+  <div class="char" id="frog">
+    <div class="halo"></div><div class="shadow"></div>
+    <video class="src" id="frogSrc" src="assets/frog_packed.mp4" autoplay muted loop playsinline preload="auto"></video>
+    <canvas class="gl" id="frogGl"></canvas>
+  </div>
+</div>
+<div id="grass"></div>
+<div id="leaves"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- 人物：普通 MP4（上半彩色+下半透明说明书）+ WebGL 实时合成 ----------
+     MP4 所有浏览器都能硬件解码，合成后就是透明人物，流畅不卡。
+     万一某个浏览器连 WebGL 都没有，自动退回动图版。 */
+  var VS = 'attribute vec2 p; varying vec2 vUv;' +
+           'void main(){ vUv = vec2(p.x*0.5+0.5, p.y*0.5+0.5); gl_Position = vec4(p, 0.0, 1.0); }';
+  var FS = 'precision mediump float; varying vec2 vUv; uniform sampler2D t;' +
+           'void main(){' +
+           '  vec4 col = texture2D(t, vec2(vUv.x, vUv.y*0.5 + 0.5));' +
+           '  float a = texture2D(t, vec2(vUv.x, vUv.y*0.5)).r;' +
+           '  gl_FragColor = vec4(col.rgb, a);' +
+           '}';
+
+  function compile(gl, type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    return s;
+  }
+
+  var glChars = [];
+  function setupPacked(video, canvas, animSrc) {
+    var fellBack = false;
+    function fallback() {
+      if (fellBack) return; fellBack = true;
+      var img = document.createElement('img');
+      img.className = 'anim'; img.src = animSrc; img.alt = '';
+      if (canvas.parentNode) canvas.replaceWith(img);
+      if (video.parentNode) video.remove();
+    }
+    var gl = null;
+    try {
+      gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: false }) ||
+           canvas.getContext('experimental-webgl', { alpha: true, premultipliedAlpha: false, antialias: false });
+    } catch (e) { gl = null; }
+    if (!gl) { fallback(); return; }
+
+    var prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { fallback(); return; }
+    gl.useProgram(prog);
+
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.clearColor(0, 0, 0, 0);
+
+    var entry = { gl: gl, tex: tex, video: video, canvas: canvas, last: -1, dead: false };
+    glChars.push(entry);
+
+    video.addEventListener('error', fallback);
+    setTimeout(function () { if (!entry.dead && video.readyState < 2) fallback(); }, 7000);
+    video.addEventListener('loadedmetadata', function () {
+      if (video.videoWidth > 0) {
+        canvas.width = video.videoWidth;
+        canvas.height = Math.floor(video.videoHeight / 2);
+      }
+    });
+  }
+
+  setupPacked(document.getElementById('cowSrc'), document.getElementById('cowGl'), 'assets/cow_anim.webp');
+  setupPacked(document.getElementById('frogSrc'), document.getElementById('frogGl'), 'assets/frog_anim.webp');
+
+  (function glLoop() {
+    for (var i = 0; i < glChars.length; i++) {
+      var e = glChars[i];
+      if (e.dead) continue;
+      var v = e.video;
+      if (v.readyState >= 2 && v.currentTime !== e.last) {
+        e.last = v.currentTime;
+        var gl = e.gl;
+        if (e.canvas.width !== v.videoWidth && v.videoWidth > 0) {
+          e.canvas.width = v.videoWidth;
+          e.canvas.height = Math.floor(v.videoHeight / 2);
+        }
+        gl.viewport(0, 0, e.canvas.width, e.canvas.height);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.bindTexture(gl.TEXTURE_2D, e.tex);
+        try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v); } catch (err) { e.dead = true; continue; }
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
+    requestAnimationFrame(glLoop);
+  })();
+
+  /* ---------- 音频：WebAudio 单通道混音 ---------- */
+  var MIX_DEFAULT = { cow: 1.0, frog: 0.10 };
+  var MIX_FROG    = { cow: 0.32, frog: 1.0 };
+  var actx = null, cowGain = null, frogGain = null, audioOn = false, restoreTimer = null;
+
+  function startAudio() {
+    if (audioOn) { if (actx && actx.state === 'suspended') actx.resume(); return; }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioOn = true;
+    actx = new AC();
+    cowGain = actx.createGain();  cowGain.gain.value = MIX_DEFAULT.cow;  cowGain.connect(actx.destination);
+    frogGain = actx.createGain(); frogGain.gain.value = MIX_DEFAULT.frog; frogGain.connect(actx.destination);
+    function load(url, gainNode) {
+      fetch(url).then(function (r) { return r.arrayBuffer(); })
+        .then(function (buf) { return actx.decodeAudioData(buf); })
+        .then(function (decoded) {
+          var src = actx.createBufferSource();
+          src.buffer = decoded; src.loop = true;
+          src.connect(gainNode); src.start(0);
+        }).catch(function () {});
+    }
+    load('assets/cow.mp3', cowGain);
+    load('assets/frog.mp3', frogGain);
+    if (actx.state === 'suspended') actx.resume();
+  }
+  window.addEventListener('pointerdown', startAudio);
+  window.addEventListener('click', startAudio);
+  window.addEventListener('touchend', startAudio);
+
+  function ramp(mix, sec) {
+    if (!actx || !cowGain || !frogGain) return;
+    var t = actx.currentTime;
+    cowGain.gain.cancelScheduledValues(t);
+    frogGain.gain.cancelScheduledValues(t);
+    cowGain.gain.setTargetAtTime(mix.cow, t, sec / 3);
+    frogGain.gain.setTargetAtTime(mix.frog, t, sec / 3);
+  }
+
+  var cowEl = document.getElementById('cow');
+  var frogEl = document.getElementById('frog');
+  function setActive(el) {
+    cowEl.classList.toggle('active', el === cowEl);
+    frogEl.classList.toggle('active', el === frogEl);
+  }
+  function activateFrog() {
+    startAudio(); setActive(frogEl); ramp(MIX_FROG, 0.6);
+    if (restoreTimer) clearTimeout(restoreTimer);
+    restoreTimer = setTimeout(function () { setActive(cowEl); ramp(MIX_DEFAULT, 0.9); }, 4000);
+  }
+  function activateCow() {
+    startAudio(); setActive(cowEl);
+    if (restoreTimer) clearTimeout(restoreTimer);
+    ramp(MIX_DEFAULT, 0.6);
+  }
+  frogEl.addEventListener('pointerenter', activateFrog);
+  frogEl.addEventListener('pointerdown', function (e) { e.stopPropagation(); activateFrog(); });
+  cowEl.addEventListener('pointerenter', activateCow);
+  cowEl.addEventListener('pointerdown', function (e) { e.stopPropagation(); activateCow(); });
+
+  /* ---------- 前景小草 ---------- */
+  var grass = document.getElementById('grass');
+  var greens = ['#4d9b3a', '#5cab45', '#3f8a30', '#67b854'];
+  var flowers = ['#ff8fb3', '#ffd34d', '#ffffff', '#c39bff'];
+  var html = '';
+  var count = Math.max(18, Math.floor(window.innerWidth / 46));
+  for (var i = 0; i < count; i++) {
+    var left = (i / (count - 1) * 100);
+    var c = greens[i % greens.length];
+    var blades = '';
+    for (var b = -2; b <= 2; b++) {
+      blades += '<path d="M50 100 Q ' + (50 + b * 9) + ' 55 ' + (50 + b * 14) + ' ' + (18 + Math.abs(b) * 7) + '" stroke="' + c + '" stroke-width="6" fill="none" stroke-linecap="round"/>';
+    }
+    var flower = '';
+    if (i % 4 === 0) {
+      var fc = flowers[i % flowers.length];
+      flower = '<circle cx="50" cy="26" r="7" fill="' + fc + '"/><circle cx="50" cy="26" r="2.8" fill="#ffdf5e"/>';
+    }
+    html += '<svg class="tuft" style="left:' + left + '%; animation-delay:-' + (Math.random() * 3).toFixed(2) + 's; animation-duration:' + (2.8 + Math.random() * 1.6).toFixed(2) + 's" viewBox="0 0 100 100">' + blades + flower + '</svg>';
+  }
+  grass.innerHTML = html;
+
+  /* ---------- 飘叶（CSS 动画） ---------- */
+  var leavesBox = document.getElementById('leaves');
+  var leafColors = ['#7ec850', '#a5d66a', '#5cab45', '#c9e17a', '#8fd0e0'];
+  var leafEls = [];
+  for (var j = 0; j < 14; j++) {
+    var d = document.createElement('div');
+    d.className = 'leaf';
+    var col = leafColors[j % leafColors.length];
+    d.innerHTML = '<svg viewBox="0 0 20 20"><path d="M10 1 C 16 6, 17 12, 10 19 C 3 12, 4 6, 10 1 Z" fill="' + col + '" opacity="0.85"/></svg>';
+    d.style.top = (Math.random() * 55) + 'vh';
+    d.style.animationDuration = (16 + Math.random() * 14) + 's';
+    d.style.animationDelay = (-Math.random() * 30) + 's';
+    leavesBox.appendChild(d);
+    leafEls.push(d);
+  }
+
+  /* 小草/飘叶按“屏幕实际宽度”定尺寸：切电脑版/手机版时布局宽度会变，
+     用 screen.width 换算补偿，屏幕上看着永远一样大 */
+  function fitDecor() {
+    var sw = (window.screen && screen.width) ? screen.width : window.innerWidth;
+    if (!sw) sw = window.innerWidth;
+    var ratio = window.innerWidth / sw;
+    var target = Math.max(24, Math.min(46, sw * 0.077));
+    var px = Math.round(target * ratio);
+    grass.style.height = px + 'px';
+    var svgs = grass.querySelectorAll('svg');
+    for (var i = 0; i < svgs.length; i++) svgs[i].style.height = px + 'px';
+    var leafPx = Math.max(7, Math.round(11 * ratio * (sw / 390 || 1))) + 'px';
+    for (var k = 0; k < leafEls.length; k++) { leafEls[k].style.width = leafPx; leafEls[k].style.height = leafPx; }
+  }
+  fitDecor();
+  window.addEventListener('resize', fitDecor);
+  window.addEventListener('orientationchange', function () { setTimeout(fitDecor, 200); });
+})();
+</script>
+</body>
+</html>
